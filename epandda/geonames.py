@@ -21,7 +21,7 @@ class geonames(mongoBasedResource):
 		pindex = self.client.endpoints.geoPointIndex
 
 		# Mongodb gridFS instance
-		grid = gridfs.GridFS(self.client.endpoints)                   
+		grid = gridfs.GridFS(self.client.endpoints)
 
 		# returns dictionary of params as defined in endpoint description
 		# will throw exception if required param is not present
@@ -31,10 +31,10 @@ class geonames(mongoBasedResource):
 		# offset and limit returned as ints with default if not set
 		offset = self.offset()
 		limit = self.limit()
-		
+
 		if limit < 1:
 			limit = 100
-		
+
 		if self.paramCount > 0:
 			criteria = {'endpoint': 'geoname', 'parameters': {}, 'matchPoints': [], 'matchTerms': {'stateProvinceNames': [], 'countryNames': [], 'countyNames': [], 'localityNames': [], 'originalStates': [], 'originalCountries': [], 'originalCounties': [], 'originalLocalities': []}}
 			geoQuery = []
@@ -43,28 +43,28 @@ class geonames(mongoBasedResource):
 				if (params[p]):
 					criteria['parameters'][p] = params[p]
 					geoQuery.append({p: params[p]})
-			
+
 			if(params['geolocation']):
 				criteria['parameters']['geolocation'] = params['geolocation']
 				geoQuery.append({'$text': {'$search': '"' + params['geolocation'] + '"', '$caseSensitive': False}})
-			
+
 			latLngQuery = []
 			if params['geoPoint']:
 				criteria['parameters']['geoPoint'] = params['geoPoint']
 				point = params['geoPoint'].split(",")
-				
+
 				try:
 					lat = float(point[0])
 					lon = float(point[1])
 				except Exception as e:
 					return self.respondWithError({"GENERAL": "Invalid coordinates"})
-				
+
 				if lon < -180 or lon > 180:
 					return self.respondWithError({"GENERAL": "Longitude is invalid"})
-					
+
 				if lat < -90 or lat > 90:
 					return self.respondWithError({"GENERAL": "Latitude is invalid"})
-				
+
 				point = [lon, lat]
 				if params['geoRadius']:
 					criteria['parameters']['geoRadius'] = params['geoRadius']
@@ -73,9 +73,22 @@ class geonames(mongoBasedResource):
 					# Set a default distance from the provided point, 10,000m
 					radius = 10000
 				latLngQuery = {'coordinates': {'$near': {'$geometry': {'type': "Point", 'coordinates': point}, '$maxDistance': radius}}}
+
+			if params['geoPolygon']:
+				criteria['parameters']['geoPolygon'] = params['geoPolygon']
+				try:
+					parseWkt = params['geoPolygon'].split("((")[1].replace('))', '').split(',')
+					polygon = []
+					#TODO: check coordinate validaty and provide useful error
+					for coords in parseWkt:
+						points = coords.split(' ')
+						polygon.append([float(points[0]), float(points[1])])
+				except Exception as e:
+					return self.respondWithError({"GENERAL": "Invalid coordinates"})
+				polygonQuery = {'coordinates': {'$geoWithin': {'$geometry': {'type': "Polygon", 'coordinates': [polygon]}}}}
 			if (len(geoQuery) == 0 and 'geoPoint' not in params):
 				return self.respondWithError({"GENERAL": "No parameters specified"})
-				
+
 			if len(geoQuery) > 0:
 				res = lindex.find({'$and': geoQuery})
 			else:
@@ -83,7 +96,10 @@ class geonames(mongoBasedResource):
 			if params['geoPoint']:
 				geoRes = pindex.find(latLngQuery)
 			else:
-				geoRes = None
+				if params['geoPolygon']:
+					geoRes = pindex.find(polygonQuery)
+				else:
+					geoRes = None
 			d = []
 			geoMatches = {'idigbio': [], 'pbdb': []}
 			matches = {'idigbio': [], 'pbdb': []}
@@ -100,7 +116,7 @@ class geonames(mongoBasedResource):
 					if 'locality' in i:
 						if i['locality'] not in criteria['matchTerms']['localityNames']:
 							criteria['matchTerms']['localityNames'].append(i['locality'])
-							
+
 					if 'originalStateProvinceName' in i:
 						for origState in i['originalStateProvinceName']:
 							if origState not in criteria['matchTerms']['originalStates']:
@@ -128,7 +144,7 @@ class geonames(mongoBasedResource):
 							idb_doc = grid.get(i['idbGridFile'])
 							idb_matches = json.loads(idb_doc.read())
 							matches['idigbio'] = matches['idigbio'] + idb_matches
-									
+
 					if 'idbGridFile' in i:
 						if type(i['idbGridFile']) is list:
 							idbGrids = i['idbGridFile']
@@ -140,7 +156,7 @@ class geonames(mongoBasedResource):
 							idb_doc = grid.get(i['idbGridFile'])
 							idb_matches = json.loads(idb_doc.read())
 							matches['idigbio'] = matches['idigbio'] + idb_matches
-					
+
 			if geoRes:
 				for r in geoRes:
 					lng_lat = r['coordinates']['coordinates']
@@ -156,19 +172,19 @@ class geonames(mongoBasedResource):
 			finalMatches = {'idigbio': [], 'pbdb': []}
 			if len(geoMatches['idigbio']) > 0 and len(matches['idigbio']) > 0:
 				finalMatches['idigbio'] = set(matches['idigbio']) & set(geoMatches['idigbio'])
-			else: 
+			else:
 				finalMatches['idigbio'] = geoMatches['idigbio'] + matches['idigbio']
 			idbCount = len(finalMatches['idigbio'])
 			if len(geoMatches['pbdb']) > 0 and len(matches['pbdb']) > 0:
 				finalMatches['pbdb'] = set(matches['pbdb']) & set(geoMatches['pbdb'])
-			else: 
+			else:
 				finalMatches['pbdb'] = geoMatches['pbdb'] + matches['pbdb']
 			pbdbCount = len(finalMatches['pbdb'])
 			resolveSet = {'idigbio': finalMatches['idigbio'][offset:limit], 'pbdb':  finalMatches['pbdb'][offset:limit]}
 			item = {'matches': finalMatches}
 			d.append(item)
 			d = self.resolveReferences(d)
-			
+
 			counts = {'totalCount': idbCount + pbdbCount, 'idbCount': idbCount, 'pbdbCount': pbdbCount}
 
 
@@ -245,5 +261,12 @@ class geonames(mongoBasedResource):
 					"type": "text",
 					"required": False,
 					"description": "The distance from the provided geoPoint to search within, in meters. Provide only the distance with no units"
+				},
+				{
+					"name": "geoPolygon",
+					"label": "WKT polygon",
+					"type": "text",
+					"required": False,
+					"description": "Well Known Text (WKT) polygon to search within. Ex: POLYGON((-78.92578125 40.2040504251133,-73.828125 40.2040504,-73.828125 37.32648861334206,-78.92578125 37.32648861334206,-78.92578125 40.2040504251133))"
 				}
 			]}
